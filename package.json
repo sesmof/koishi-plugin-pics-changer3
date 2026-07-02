@@ -1,0 +1,23 @@
+{
+  "name": "koishi-plugin-pics-changer3",
+  "description": "对图片进行左右上下对称左右上下翻转",
+  "version": "0.0.12",
+  "main": "lib/index.js",
+  "typings": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "dist"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "chatbot",
+    "koishi",
+    "plugin"
+  ],
+  "peerDependencies": {
+    "koishi": "^4.18.7"
+  },
+  "dependencies": {
+    "koishi-plugin-ffmpeg": "^1.1.0"
+  }
+}
