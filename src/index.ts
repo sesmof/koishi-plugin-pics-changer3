@@ -1,9 +1,15 @@
-import { Context, Schema, Session, h } from 'koishi'
-import { } from 'koishi-plugin-ffmpeg' // 声明依赖 ffmpeg 服务
-import * as fs from 'node:fs/promises'
-import * as path from 'node:path'
-import * as os from 'node:os'
 import * as crypto from 'node:crypto' // 使用 Node.js 原生 crypto 模块
+import * as fs from 'node:fs/promises'
+import * as os from 'node:os'
+import * as path from 'node:path'
+
+import type {} from '@koishijs/plugin-help'
+import { Context, Session, h } from 'koishi'
+import { } from 'koishi-plugin-ffmpeg' // 声明依赖 ffmpeg 服务
+
+import type { Config } from './config'
+
+export { Config } from './config'
 
 export const name = 'pics-changer3'
 
@@ -12,32 +18,58 @@ export const inject = {
   required: ['http', 'ffmpeg']
 }
 
-export interface Config {
-  upsymmetry: string
-  downsymmetry: string
-  leftsymmetry: string
-  rightsymmetry: string
-  defaultsymmetry: string
-  promptTimeout: number
-}
-
-export const Config: Schema<Config> = Schema.object({
-  upsymmetry: Schema.string().default('上对称').description('上对称指令'),
-  downsymmetry: Schema.string().default('下对称').description('下对称指令'),
-  leftsymmetry: Schema.string().default('左对称').description('左对称指令'),
-  rightsymmetry: Schema.string().default('右对称').description('右对称指令'),
-  defaultsymmetry: Schema.string().default('对称').description('默认对称指令'),
-  promptTimeout: Schema.number().default(30).description('等待用户发送图片的超时时间 (秒)')
-})
-
 export function apply(ctx: Context, config: Config) {
+  const directions = [
+    { name: config.upsymmetry, description: '保留上半边，沿水平中线将上半边上下镜像到下半边，覆盖原下半边。' },
+    { name: config.downsymmetry, description: '保留下半边，沿水平中线将下半边上下镜像到上半边，覆盖原上半边。' },
+    { name: config.leftsymmetry, description: '保留左半边，沿垂直中线将左半边左右镜像到右半边，覆盖原右半边。' },
+    { name: config.rightsymmetry, description: '保留右半边，沿垂直中线将右半边左右镜像到左半边，覆盖原左半边。' },
+  ]
+  const imageUsage = [
+    '支持静态图片和 GIF 动图，可一次附带多张图片。',
+    '用法：在指令后附图，或引用含图片的消息后发送指令；引用图片优先。',
+    `也可以先发送方向指令，再在 ${config.promptTimeout} 秒内发送图片。`,
+    '指令名中的方向表示保留哪一半；这些操作生成对称图，不是将整张图片翻转。',
+  ].join('\n')
 
-  // 1. 注册 5 个指令，统一调用核心处理函数 handleSymmetry
-  ctx.command(`${config.upsymmetry} [...图片]`).action(async ({ session }, ...图片) => handleSymmetry(session, config.upsymmetry, 图片))
-  ctx.command(`${config.downsymmetry} [...图片]`).action(async ({ session }, ...图片) => handleSymmetry(session, config.downsymmetry, 图片))
-  ctx.command(`${config.leftsymmetry} [...图片]`).action(async ({ session }, ...图片) => handleSymmetry(session, config.leftsymmetry, 图片))
-  ctx.command(`${config.rightsymmetry} [...图片]`).action(async ({ session }, ...图片) => handleSymmetry(session, config.rightsymmetry, 图片))
-  ctx.command(`${config.defaultsymmetry} [...图片]`).action(async ({ session }, ...图片) => handleSymmetry(session, config.defaultsymmetry, 图片))
+  const directionCommands = directions.map(({ name, description }) =>
+    ctx.command(`${name} [...图片]`, description)
+      .usage(`${description}\n\n${imageUsage}`)
+      .example(`${name}（附上图片，或引用图片后发送）`)
+      .action(async ({ session }, ...图片) => handleSymmetry(session, name, 图片)))
+
+  const helpCommand = ctx.command(config.defaultsymmetry, '查看图片对称指令的详细帮助')
+    .usage([
+      `发送 ${config.defaultsymmetry} 等同于 ${config.defaultsymmetry} --help，只显示帮助，不处理图片。`,
+      '',
+      ...directions.map(({ name, description }) => `${name}：${description}`),
+      '',
+      imageUsage,
+      `发送“方向指令 --help”可查看该指令的单独帮助，例如 ${config.leftsymmetry} --help。`,
+    ].join('\n'))
+    .example(config.defaultsymmetry)
+    .example(`${config.leftsymmetry}（附上图片，保留左半边并镜像到右半边）`)
+    .action(async ({ session }) => {
+      if (!session) return
+      if (!ctx.$commander.get('help') || !helpCommand._options.help) {
+        return withQuote(session, '请启用 Koishi 的 help 插件及其 options 配置，以查看指令帮助。')
+      }
+      await session.execute(`${config.defaultsymmetry} --help`)
+    })
+
+  // 原生帮助由 help 插件发送，也遵循本插件的引用开关。
+  const helpTargets = new Set([...directionCommands, helpCommand])
+  ctx.on('help/command', (output, command, session) => {
+    if (helpTargets.has(command) && config.enableQuote && session.messageId) {
+      output.unshift(h.quote(session.messageId).toString())
+    }
+  })
+
+  function withQuote(session: Session, content: string | h) {
+    return config.enableQuote && session.messageId
+      ? [h.quote(session.messageId), content]
+      : content
+  }
 
   // 核心业务逻辑处理函数
   async function handleSymmetry(session: Session | undefined, commandType: string, inputImages: string[]) {
@@ -57,10 +89,10 @@ export function apply(ctx: Context, config: Config) {
 
     // 如果没有图片参数且没有引用消息中的图片，则交互式获取
     if (currentImages.length === 0) {
-      await session.send('请发送图片或动图')
+      await session.send(withQuote(session, '请发送图片或动图'))
       const promptResult = await session.prompt(config.promptTimeout * 1000)
       if (!promptResult) {
-        return '未收到图片'
+        return withQuote(session, '未收到图片')
       }
       currentImages = [promptResult]
     }
@@ -74,20 +106,20 @@ export function apply(ctx: Context, config: Config) {
     }
 
     if (allImages.length === 0) {
-      return '请发送有效的图片'
+      return withQuote(session, '请发送有效的图片')
     }
 
     // 成功获取到图片元素数组后，调用修改函数
     try {
       const results = await changeimg(allImages, commandType)
       for (const result of results) {
-        await session.send(result)
+        await session.send(withQuote(session, result))
       }
     } catch (error) {
       if (error instanceof Error) {
-        return `处理失败: ${error.message}`
+        return withQuote(session, `处理失败: ${error.message}`)
       }
-      return `处理失败: 发生了未知错误`
+      return withQuote(session, '处理失败: 发生了未知错误')
     }
   }
 
@@ -124,7 +156,7 @@ export function apply(ctx: Context, config: Config) {
       }
 
       // 将 Buffer 转换为带 mime 头的标准 Data URL 字符串
-      const mime = file.mime || (isGif ? 'image/gif' : 'image/png')
+      const mime = isGif ? 'image/gif' : 'image/png'
       const dataUrl = `data:${mime};base64,${outputBuffer.toString('base64')}`
 
       outputElements.push(h.image(dataUrl))
@@ -135,25 +167,25 @@ export function apply(ctx: Context, config: Config) {
 
   // 上对称 (wc -> wm)：保留上半部不动，翻转贴到下半部
   async function UPsymmetry(input: Buffer, isGif: boolean): Promise<Buffer> {
-    const filter = 'split[main][flip];[flip]crop=iw:ih/2:0:0,vflip[flipped];[main][flipped]overlay=0:H/2'
+    const filter = 'format=rgba,split[main][flip];[flip]crop=iw:ih/2:0:0,vflip[flipped];[main][flipped]overlay=0:H/2'
     return runFFmpegWithFile(input, filter, isGif)
   }
 
   // 下对称 (wm -> wc)：保留下半部不动，翻转贴到上半部
   async function DOWNsymmetry(input: Buffer, isGif: boolean): Promise<Buffer> {
-    const filter = 'split[main][flip];[flip]crop=iw:ih/2:0:ih/2,vflip[flipped];[main][flipped]overlay=0:0'
+    const filter = 'format=rgba,split[main][flip];[flip]crop=iw:ih/2:0:ih/2,vflip[flipped];[main][flipped]overlay=0:0'
     return runFFmpegWithFile(input, filter, isGif)
   }
 
   // 左对称 (ba -> bd)：保留左半部不动，翻转贴到右半部
   async function LEFTsymmetry(input: Buffer, isGif: boolean): Promise<Buffer> {
-    const filter = 'split[main][flip];[flip]crop=iw/2:ih:0:0,hflip[flipped];[main][flipped]overlay=W/2:0'
+    const filter = 'format=rgba,split[main][flip];[flip]crop=iw/2:ih:0:0,hflip[flipped];[main][flipped]overlay=W/2:0'
     return runFFmpegWithFile(input, filter, isGif)
   }
 
   // 右对称 (ab -> db)：保留右半部不动，翻转贴到左半部
   async function RIGHTsymmetry(input: Buffer, isGif: boolean): Promise<Buffer> {
-    const filter = 'split[main][flip];[flip]crop=iw/2:ih:iw/2:0,hflip[flipped];[main][flipped]overlay=0:0'
+    const filter = 'format=rgba,split[main][flip];[flip]crop=iw/2:ih:iw/2:0,hflip[flipped];[main][flipped]overlay=0:0'
     return runFFmpegWithFile(input, filter, isGif)
   }
 
@@ -182,6 +214,7 @@ export function apply(ctx: Context, config: Config) {
         builder.outputOption('-filter_complex', filter)
         builder.outputOption('-vframes', '1')
         builder.outputOption('-f', 'image2')
+        builder.outputOption('-c:v', 'png')
       }
 
       // 3. 运行并返回内存 Buffer
@@ -194,137 +227,3 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 }
-
-
-//myver 0.0.1
-// import { Context, Schema, Session, h } from 'koishi'
-// import { } from 'koishi-plugin-ffmpeg'
-
-// export const name = 'pics-changer'
-
-// export interface Config {
-//   upsymmetry: string
-//   downsymmetry: string
-//   leftsymmetry: string
-//   rightsymmetry: string
-//   defaultsymmetry: string
-//   promptTimeout: number
-// }
-
-// export const Config: Schema<Config> = Schema.object({
-//   upsymmetry: Schema.string().default('上对称').description('上对称指令'),
-//   downsymmetry: Schema.string().default('下对称').description('下对称指令'),
-//   leftsymmetry: Schema.string().default('左对称').description('左对称指令'),
-//   rightsymmetry: Schema.string().default('右对称').description('右对称指令'),
-//   defaultsymmetry: Schema.string().default('对称').description('默认对称指令'),
-//   promptTimeout: Schema.number().default(30).description('等待用户发送图片的超时时间 (秒)')
-// })
-
-// export function apply(ctx: Context, config: Config) {
-  
-//   ctx.command(`${config.upsymmetry} [...图片]`)
-//     .action(async ({ session },  ...图片)=> {
-//       // 优先检查引用消息中的图片
-//       if (session.quote) {
-//         loginfo('检测到引用消息，尝试从引用消息中提取图片')
-//         const quoteElements = h.parse(session.quote.content)
-//         const quoteImages = quoteElements.filter(el => ['img', 'mface', 'image', 'video'].includes(el.type))
-
-//         if (quoteImages.length > 0) {
-//           loginfo('从引用消息中找到图片:', quoteImages.length, '个')
-//           图片 = [session.quote.content]
-//         }
-//       }
-
-//       // 如果没有图片参数且没有引用消息中的图片，则交互式获取
-//       if (图片.length === 0) {
-//         await session.send('请发送图片或视频')
-//         const promptResult = await session.prompt(config.promptTimeout * 1000)
-//         if (!promptResult) {
-//           return '未收到图片或视频'
-//         }
-//         图片 = [promptResult]
-//       }
-
-//       // 解析所有图片参数
-//       let allImages = []
-//       for (const 图片Item of 图片) {
-//         const elements = h.parse(图片Item)
-//         const images = elements.filter(el => ['img', 'mface', 'image', 'video'].includes(el.type))
-//         allImages.push(...images)
-//       }
-
-//       if (allImages.length === 0) {
-//         return '请发送有效的图片或视频'
-//       }
-
-//     })
-
-
-  
-
-  
-
-//   // ctx.command(`${config.upsymmetry} [图片]`, { captureQuote: false })
-//   // .userFields(['id', 'name', 'authority'])
-//   // .action(async ({ session }, 图片) => {
-
-//   // }
-
-
-
-
-
-
-  
-//   //图片修改函数
-//   async function changeimg(
-//     img: any,
-//     change_option: string
-//     ){
-//       if (change_option === config.upsymmetry) {
-
-//       }
-//       if (change_option === config.downsymmetry) {
-        
-//       }
-//       if (change_option === config.leftsymmetry || change_option === config.defaultsymmetry) {
-
-//       }
-//       if (change_option === config.rightsymmetry) {
-
-//       }
-//     }
-
-
-//   //图片修改函数的具体实现
-//   //上对称
-//   function UPsymmetry(
-//     img: any
-//   ){
-
-//   }
-
-//   //下对称
-//   function DOWNsymmetry(
-//     img: any
-//   ){
-
-//   }
-
-//   //左对称
-//   function LEFTsymmetry(
-//     img: any
-//   ){
-
-//   }
-
-//   //右对称
-//   function RIGHTsymmetry(
-//     img: any
-//   ){
-
-//   }
-
-// }
-

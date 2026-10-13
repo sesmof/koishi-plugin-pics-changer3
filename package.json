@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-pics-changer3",
-  "description": "对图片进行左右上下对称左右上下翻转",
-  "version": "0.0.12",
+  "description": "对图片进行左右上下对称翻转，形成轴对称图",
+  "version": "0.1.2",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -19,5 +19,8 @@
   },
   "dependencies": {
     "koishi-plugin-ffmpeg": "^1.1.0"
+  },
+  "devDependencies": {
+    "@koishijs/plugin-help": "^2.4.6"
   }
 }
